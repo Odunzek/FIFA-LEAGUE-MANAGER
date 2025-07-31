@@ -60,7 +60,7 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
         setIsLoaded(true);
       }
     }
-  }, []);
+  }, [onLeagueSelect]);
 
   // Save leagues to localStorage whenever they change
   useEffect(() => {

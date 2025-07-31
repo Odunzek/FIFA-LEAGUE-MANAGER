@@ -1,6 +1,7 @@
 // app/api/matches/route.ts - Copy this into your matches route file
 import { NextRequest, NextResponse } from 'next/server';
-import { createMatch, getMatchesByLeague, getLeagueByName, getTeamsByLeague, updateTeamStats } from '@/lib/db';
+// import { createMatch, getMatchesByLeague, getLeagueByName, getTeamsByLeague, updateTeamStats } from '@/lib/db';
+import { createMatch, getMatchesByLeague, getLeagueByName, getTeamsByLeague, updateTeamStats } from '../../../lib/db';
 
 export async function GET(request: NextRequest) {
   try {
