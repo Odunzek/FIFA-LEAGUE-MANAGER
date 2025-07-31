@@ -3,7 +3,7 @@
 import LeagueSelector from "./components/LeagueSelector";
 import LeagueTable from "./components/LeagueTable";
 import Link from "next/link";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 export default function Home() {
   const [selectedLeague, setSelectedLeague] = useState<string>("");
@@ -25,9 +25,9 @@ export default function Home() {
     }
   }, [selectedLeague, mounted]);
 
-  const handleLeagueSelect = (league: string) => {
+  const handleLeagueSelect = useCallback((league: string) => {
     setSelectedLeague(league);
-  };
+  }, []);
 
   // Show nothing during SSR to prevent hydration mismatch
   if (!mounted) {
