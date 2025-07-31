@@ -1,7 +1,7 @@
 // app/api/matches/route.ts - Copy this into your matches route file
 import { NextRequest, NextResponse } from 'next/server';
 // import { createMatch, getMatchesByLeague, getLeagueByName, getTeamsByLeague, updateTeamStats } from '@/lib/db';
-import { createMatch, getMatchesByLeague, getLeagueByName, getTeamsByLeague, updateTeamStats } from '../../../lib/db';
+import { createMatch, getMatchesByLeague, getLeagueByName, getTeamsByLeague, updateTeamStats } from '../../../lib/matchUtils';
 
 export async function GET(request: NextRequest) {
   try {
@@ -63,8 +63,8 @@ export async function POST(request: NextRequest) {
         team1Data.won + (team1IsWin ? 1 : 0),
         team1Data.drawn + (team1IsDraw ? 1 : 0),
         team1Data.lost + (team1IsLoss ? 1 : 0),
-        team1Data.goals_for + score1,
-        team1Data.goals_against + score2,
+        team1Data.goalsFor + score1,
+        team1Data.goalsAgainst + score2,
         team1Data.points + (team1IsWin ? 3 : team1IsDraw ? 1 : 0)
       );
 
@@ -80,8 +80,8 @@ export async function POST(request: NextRequest) {
         team2Data.won + (team2IsWin ? 1 : 0),
         team2Data.drawn + (team2IsDraw ? 1 : 0),
         team2Data.lost + (team2IsLoss ? 1 : 0),
-        team2Data.goals_for + score2,
-        team2Data.goals_against + score1,
+        team2Data.goalsFor + score2,
+        team2Data.goalsAgainst + score1,
         team2Data.points + (team2IsWin ? 3 : team2IsDraw ? 1 : 0)
       );
     }
