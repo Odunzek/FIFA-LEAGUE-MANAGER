@@ -7,6 +7,7 @@ import { useState, useEffect, useCallback } from "react";
 
 export default function Home() {
   const [selectedLeague, setSelectedLeague] = useState<string>("");
+  const [selectedLeagueId, setSelectedLeagueId] = useState<string>("");
   const [mounted, setMounted] = useState(false);
 
   // Handle mounting and localStorage in a single effect
@@ -15,7 +16,9 @@ export default function Home() {
     
     // Only access localStorage after component is mounted
     const savedLeague = localStorage.getItem("currentLeagueName") || "";
+    const savedLeagueId = localStorage.getItem("currentLeagueId") || "";
     setSelectedLeague(savedLeague);
+    setSelectedLeagueId(savedLeagueId);
   }, []);
 
   // Save the selected league whenever it changes (only after mounting)
@@ -23,10 +26,14 @@ export default function Home() {
     if (mounted && selectedLeague) {
       localStorage.setItem("currentLeagueName", selectedLeague);
     }
-  }, [selectedLeague, mounted]);
+    if (mounted && selectedLeagueId) {
+      localStorage.setItem("currentLeagueId", selectedLeagueId);
+    }
+  }, [selectedLeague, selectedLeagueId, mounted]);
 
-  const handleLeagueSelect = useCallback((league: string) => {
+  const handleLeagueSelect = useCallback((league: string, leagueId: string) => {
     setSelectedLeague(league);
+    setSelectedLeagueId(leagueId);
   }, []);
 
   // Show nothing during SSR to prevent hydration mismatch
@@ -99,7 +106,7 @@ export default function Home() {
             </div>
 
             {/* League Table */}
-            <LeagueTable leagueName={selectedLeague} />
+            <LeagueTable leagueName={selectedLeague} leagueId={selectedLeagueId} />
 
             {/* Additional Links */}
             <div className="flex justify-center pt-8">

@@ -21,6 +21,7 @@ type Team = {
 // Props interface to receive the selected league name
 interface LeagueTableProps {
   leagueName: string;
+  leagueId: string;
 }
 
 // Toast notification component

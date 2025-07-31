@@ -15,6 +15,10 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Football League Manager",
   description: "Created by Kachy",
+  icons: {
+    icon: "/ea.png",
+  },
+  
 };
 
 export default function RootLayout({

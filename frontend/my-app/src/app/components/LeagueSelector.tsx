@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { createLeague, deleteLeague, subscribeToLeagues, League, updateLeague } from "../../lib/firebaseutils";
 
 interface LeagueSelectorProps {
-  onLeagueSelect: (league: string) => void;
+  onLeagueSelect: (league: string, leagueId: string) => void;
 }
 
 // Toast notification component
@@ -24,13 +25,16 @@ const Toast = ({ message, type, onClose }: { message: string; type: 'success' | 
 );
 
 export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) {
-  const [leagues, setLeagues] = useState<string[]>([]);
-  const [currentLeague, setCurrentLeague] = useState("");
+  const [leagues, setLeagues] = useState<League[]>([]);
+  const [currentLeague, setCurrentLeague] = useState<League | null>(null);
   const [inputValue, setInputValue] = useState("");
   const [isCreatingNew, setIsCreatingNew] = useState(false);
-  const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState<League | null>(null);
+  const [editingLeague, setEditingLeague] = useState<League | null>(null);
+  const [editValue, setEditValue] = useState("");
   const [error, setError] = useState("");
   const [isLoaded, setIsLoaded] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
 
   // Show toast notification
@@ -39,42 +43,40 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
     setTimeout(() => setToast(null), 3000);
   };
 
-  // Load data on mount
+  // Load data and setup real-time listener
   useEffect(() => {
-    if (typeof window !== "undefined") {
-      try {
-        const savedLeagues = JSON.parse(localStorage.getItem("leagueList") || "[]");
-        const savedCurrent = localStorage.getItem("currentLeagueName") || "";
-        
-        setLeagues(Array.isArray(savedLeagues) ? savedLeagues : []);
-        setCurrentLeague(savedCurrent);
-        setIsLoaded(true);
-        
-        if (savedCurrent && onLeagueSelect) {
-          onLeagueSelect(savedCurrent);
-        }
-      } catch (error) {
-        console.error("Error loading data:", error);
-        setLeagues([]);
-        setCurrentLeague("");
-        setIsLoaded(true);
+    setIsLoaded(true);
+    
+    // Setup real-time listener for leagues
+    const unsubscribe = subscribeToLeagues((updatedLeagues) => {
+      setLeagues(updatedLeagues);
+      
+      // Get current league from localStorage for initial load
+      const savedCurrentId = localStorage.getItem("currentLeagueId") || "";
+      const savedLeague = updatedLeagues.find(league => league.id === savedCurrentId);
+      
+      if (savedLeague) {
+        setCurrentLeague(savedLeague);
+        onLeagueSelect(savedLeague.name, savedLeague.id!);
+      } else if (updatedLeagues.length > 0 && !currentLeague) {
+        // Auto-select first league if none selected
+        const firstLeague = updatedLeagues[0];
+        setCurrentLeague(firstLeague);
+        onLeagueSelect(firstLeague.name, firstLeague.id!);
       }
-    }
-  }, [onLeagueSelect]);
+    });
 
-  // Save leagues to localStorage whenever they change
-  useEffect(() => {
-    if (typeof window !== "undefined" && isLoaded) {
-      localStorage.setItem("leagueList", JSON.stringify(leagues));
-    }
-  }, [leagues, isLoaded]);
+    // Cleanup listener on unmount
+    return () => unsubscribe();
+  }, []);
 
-  // Save current league to localStorage whenever it changes
+  // Save current league to localStorage
   useEffect(() => {
-    if (typeof window !== "undefined" && isLoaded && currentLeague) {
-      localStorage.setItem("currentLeagueName", currentLeague);
+    if (currentLeague?.id) {
+      localStorage.setItem("currentLeagueId", currentLeague.id);
+      localStorage.setItem("currentLeagueName", currentLeague.name);
     }
-  }, [currentLeague, isLoaded]);
+  }, [currentLeague]);
 
   // Clear error after 3 seconds
   useEffect(() => {
@@ -84,25 +86,31 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
     }
   }, [error]);
 
-  const validateLeagueName = (name: string): string | null => {
+  const validateLeagueName = (name: string, excludeId?: string): string | null => {
     if (!name.trim()) return "League name cannot be empty";
     if (name.trim().length < 2) return "League name must be at least 2 characters";
     if (name.trim().length > 50) return "League name must be less than 50 characters";
-    if (leagues.includes(name.trim())) return "League name already exists";
+    
+    const existingLeague = leagues.find(league => 
+      league.name.toLowerCase() === name.trim().toLowerCase() && league.id !== excludeId
+    );
+    if (existingLeague) return "League name already exists";
+    
     return null;
   };
 
-  const handleSelectExisting = (leagueName: string) => {
-    setCurrentLeague(leagueName);
+  const handleSelectExisting = (league: League) => {
+    setCurrentLeague(league);
     setInputValue("");
     setIsCreatingNew(false);
+    setEditingLeague(null);
     setError("");
     
-    showToast(`Switched to ${leagueName}`, 'info');
-    onLeagueSelect(leagueName);
+    showToast(`Switched to ${league.name}`, 'info');
+    onLeagueSelect(league.name, league.id!);
   };
 
-  const handleCreateNew = () => {
+  const handleCreateNew = async () => {
     const trimmedName = inputValue.trim();
     const validationError = validateLeagueName(trimmedName);
     
@@ -111,43 +119,117 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
       return;
     }
 
-    const updatedLeagues = [...leagues, trimmedName];
-    setLeagues(updatedLeagues);
-    setCurrentLeague(trimmedName);
-    setInputValue("");
-    setIsCreatingNew(false);
-    setError("");
-    
-    showToast(`${trimmedName} league created successfully!`, 'success');
-    onLeagueSelect(trimmedName);
+    setIsLoading(true);
+    try {
+      const newLeagueId = await createLeague(trimmedName);
+      const newLeague: League = {
+        id: newLeagueId,
+        name: trimmedName,
+        createdAt: new Date(),
+        teams: []
+      };
+      
+      setCurrentLeague(newLeague);
+      setInputValue("");
+      setIsCreatingNew(false);
+      setError("");
+      
+      showToast(`${trimmedName} league created successfully!`, 'success');
+      onLeagueSelect(trimmedName, newLeagueId);
+    } catch (error) {
+      console.error('Error creating league:', error);
+      setError("Failed to create league. Please try again.");
+      showToast("Failed to create league", 'error');
+    } finally {
+      setIsLoading(false);
+    }
   };
 
-  const handleDeleteLeague = (leagueName: string) => {
-    if (typeof window !== "undefined") {
-      const updatedLeagues = leagues.filter(name => name !== leagueName);
-      setLeagues(updatedLeagues);
-      
-      localStorage.removeItem(`league_${leagueName}_teams`);
-      localStorage.removeItem(`league_${leagueName}_history`);
-      
-      if (currentLeague === leagueName) {
-        const newCurrent = updatedLeagues.length > 0 ? updatedLeagues[0] : "";
-        setCurrentLeague(newCurrent);
-        onLeagueSelect(newCurrent);
-      }
-    }
+  const handleEditLeague = (league: League) => {
+    setEditingLeague(league);
+    setEditValue(league.name);
+    setIsCreatingNew(false);
+    setError("");
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editingLeague?.id) return;
     
-    setShowDeleteConfirm(null);
-    showToast(`${leagueName} league deleted successfully`, 'success');
+    const trimmedName = editValue.trim();
+    const validationError = validateLeagueName(trimmedName, editingLeague.id);
+    
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      await updateLeague(editingLeague.id, { name: trimmedName });
+      
+      // Update current league if it's the one being edited
+      if (currentLeague?.id === editingLeague.id) {
+        const updatedLeague = { ...currentLeague, name: trimmedName };
+        setCurrentLeague(updatedLeague);
+        onLeagueSelect(trimmedName, editingLeague.id);
+      }
+      
+      setEditingLeague(null);
+      setEditValue("");
+      setError("");
+      
+      showToast(`League renamed to "${trimmedName}"`, 'success');
+    } catch (error) {
+      console.error('Error updating league:', error);
+      setError("Failed to update league. Please try again.");
+      showToast("Failed to update league", 'error');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleDeleteLeague = async (league: League) => {
+    if (!league.id) return;
+    
+    setIsLoading(true);
+    try {
+      await deleteLeague(league.id);
+      
+      if (currentLeague?.id === league.id) {
+        const remainingLeagues = leagues.filter(l => l.id !== league.id);
+        if (remainingLeagues.length > 0) {
+          const newCurrent = remainingLeagues[0];
+          setCurrentLeague(newCurrent);
+          onLeagueSelect(newCurrent.name, newCurrent.id!);
+        } else {
+          setCurrentLeague(null);
+          onLeagueSelect("", "");
+        }
+      }
+      
+      showToast(`${league.name} league deleted successfully`, 'success');
+    } catch (error) {
+      console.error('Error deleting league:', error);
+      showToast("Failed to delete league", 'error');
+    } finally {
+      setIsLoading(false);
+      setShowDeleteConfirm(null);
+    }
   };
 
   const handleKeyPress = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      handleCreateNew();
+    if (e.key === 'Enter' && !isLoading) {
+      if (editingLeague) {
+        handleSaveEdit();
+      } else {
+        handleCreateNew();
+      }
     }
     if (e.key === 'Escape') {
       setIsCreatingNew(false);
+      setEditingLeague(null);
       setInputValue("");
+      setEditValue("");
       setError("");
     }
   };
@@ -195,7 +277,7 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
             {currentLeague && (
               <div className="bg-white/20 backdrop-blur-sm px-4 py-2 rounded-xl">
                 <span className="text-white/80 text-sm font-medium">Current:</span>
-                <span className="text-white font-bold ml-2">{currentLeague}</span>
+                <span className="text-white font-bold ml-2">{currentLeague.name}</span>
               </div>
             )}
           </div>
@@ -226,47 +308,112 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                 {leagues.map((league, index) => (
                   <div
-                    key={league}
+                    key={league.id}
                     className={`group relative p-6 rounded-xl border-2 transition-all duration-300 cursor-pointer transform hover:scale-105 ${
-                      currentLeague === league
+                      currentLeague?.id === league.id
                         ? 'border-green-400 bg-gradient-to-br from-green-50 to-emerald-50 shadow-lg'
                         : 'border-gray-200 bg-gradient-to-br from-gray-50 to-white hover:border-blue-300 hover:shadow-lg'
                     }`}
-                    onClick={() => currentLeague !== league && handleSelectExisting(league)}
+                    onClick={() => !editingLeague && currentLeague?.id !== league.id && handleSelectExisting(league)}
                   >
                     {/* League Card Content */}
                     <div className="flex items-start justify-between mb-4">
-                      <div className="flex items-center space-x-3">
+                      <div className="flex items-center space-x-3 flex-1">
                         <div className={`w-3 h-3 rounded-full ${
-                          currentLeague === league ? 'bg-green-400' : 'bg-blue-400'
+                          currentLeague?.id === league.id ? 'bg-green-400' : 'bg-blue-400'
                         }`}></div>
-                        <span className={`font-bold text-lg ${
-                          currentLeague === league ? 'text-green-800' : 'text-gray-800'
-                        }`}>
-                          {league}
-                        </span>
+                        
+                        {/* Editable League Name */}
+                        {editingLeague?.id === league.id ? (
+                          <input
+                            type="text"
+                            value={editValue}
+                            onChange={(e) => setEditValue(e.target.value)}
+                            onKeyDown={handleKeyPress}
+                            className="font-bold text-lg bg-white border-2 border-blue-300 rounded-lg px-2 py-1 focus:outline-none focus:border-blue-500"
+                            autoFocus
+                            maxLength={50}
+                            disabled={isLoading}
+                          />
+                        ) : (
+                          <span className={`font-bold text-lg ${
+                            currentLeague?.id === league.id ? 'text-green-800' : 'text-gray-800'
+                          }`}>
+                            {league.name}
+                          </span>
+                        )}
                       </div>
                       
-                      {/* Delete Button */}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setShowDeleteConfirm(league);
-                        }}
-                        className="opacity-0 group-hover:opacity-100 p-2 text-red-500 hover:text-red-700 hover:bg-red-100 rounded-lg transition-all duration-300"
-                        title="Delete league"
-                      >
-                        🗑️
-                      </button>
+                      {/* Action Buttons */}
+                      <div className="flex items-center space-x-1">
+                        {editingLeague?.id === league.id ? (
+                          <>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleSaveEdit();
+                              }}
+                              disabled={isLoading}
+                              className="p-2 text-green-600 hover:text-green-800 hover:bg-green-100 rounded-lg transition-all duration-300"
+                              title="Save changes"
+                            >
+                              ✅
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingLeague(null);
+                                setEditValue("");
+                                setError("");
+                              }}
+                              disabled={isLoading}
+                              className="p-2 text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-lg transition-all duration-300"
+                              title="Cancel editing"
+                            >
+                              ❌
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleEditLeague(league);
+                              }}
+                              className="opacity-0 group-hover:opacity-100 p-2 text-blue-500 hover:text-blue-700 hover:bg-blue-100 rounded-lg transition-all duration-300"
+                              title="Edit league name"
+                              disabled={isLoading}
+                            >
+                              ✏️
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setShowDeleteConfirm(league);
+                              }}
+                              className="opacity-0 group-hover:opacity-100 p-2 text-red-500 hover:text-red-700 hover:bg-red-100 rounded-lg transition-all duration-300"
+                              title="Delete league"
+                              disabled={isLoading}
+                            >
+                              🗑️
+                            </button>
+                          </>
+                        )}
+                      </div>
                     </div>
 
                     {/* League Status */}
                     <div className="flex items-center justify-between">
                       <div className="text-sm text-gray-600">
-                        {currentLeague === league ? (
+                        {currentLeague?.id === league.id ? (
                           <div className="flex items-center space-x-2">
                             <span className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></span>
                             <span className="font-medium text-green-700">Currently Active</span>
+                          </div>
+                        ) : editingLeague?.id === league.id ? (
+                          <div className="flex items-center space-x-2">
+                            <span className="w-2 h-2 bg-blue-400 rounded-full animate-pulse"></span>
+                            <span className="font-medium text-blue-700">Editing...</span>
                           </div>
                         ) : (
                           <span className="text-gray-500">Click to switch</span>
@@ -275,7 +422,7 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
                       
                       {/* League Number Badge */}
                       <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold ${
-                        currentLeague === league 
+                        currentLeague?.id === league.id 
                           ? 'bg-green-400 text-white' 
                           : 'bg-gray-300 text-gray-600'
                       }`}>
@@ -284,7 +431,7 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
                     </div>
 
                     {/* Active indicator */}
-                    {currentLeague === league && (
+                    {currentLeague?.id === league.id && (
                       <div className="absolute top-2 right-2">
                         <div className="w-3 h-3 bg-green-400 rounded-full animate-ping"></div>
                         <div className="absolute top-0 right-0 w-3 h-3 bg-green-400 rounded-full"></div>
@@ -316,10 +463,11 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
                 </div>
               </div>
               
-              {!isCreatingNew && (
+              {!isCreatingNew && !editingLeague && (
                 <button
                   onClick={() => setIsCreatingNew(true)}
-                  className="bg-gradient-to-r from-blue-500 to-indigo-500 text-white px-6 py-3 rounded-xl hover:from-blue-600 hover:to-indigo-600 transition-all duration-300 transform hover:scale-105 shadow-lg font-semibold"
+                  disabled={isLoading}
+                  className="bg-gradient-to-r from-blue-500 to-indigo-500 text-white px-6 py-3 rounded-xl hover:from-blue-600 hover:to-indigo-600 transition-all duration-300 transform hover:scale-105 shadow-lg font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   New League
                 </button>
@@ -339,6 +487,7 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
                       className="w-full px-4 py-3 border-2 border-gray-200 rounded-xl text-gray-900 placeholder-gray-400 focus:outline-none focus:border-blue-500 focus:ring-4 focus:ring-blue-100 transition-all duration-300"
                       autoFocus
                       maxLength={50}
+                      disabled={isLoading}
                     />
                     <div className="mt-2 flex items-center justify-between text-xs">
                       <span className="text-gray-500">
@@ -351,10 +500,17 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
                   <div className="flex gap-3">
                     <button
                       onClick={handleCreateNew}
-                      disabled={!inputValue.trim() || !!error}
+                      disabled={!inputValue.trim() || !!error || isLoading}
                       className="bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 disabled:from-gray-400 disabled:to-gray-500 text-white px-6 py-3 rounded-xl font-semibold transition-all duration-300 transform hover:scale-105 shadow-lg disabled:cursor-not-allowed disabled:transform-none"
                     >
-                      Create
+                      {isLoading ? (
+                        <div className="flex items-center space-x-2">
+                          <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                          <span>Creating...</span>
+                        </div>
+                      ) : (
+                        'Create'
+                      )}
                     </button>
                     <button
                       onClick={() => {
@@ -362,7 +518,8 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
                         setInputValue("");
                         setError("");
                       }}
-                      className="bg-gray-500 hover:bg-gray-600 text-white px-6 py-3 rounded-xl font-semibold transition-all duration-300 transform hover:scale-105"
+                      disabled={isLoading}
+                      className="bg-gray-500 hover:bg-gray-600 text-white px-6 py-3 rounded-xl font-semibold transition-all duration-300 transform hover:scale-105 disabled:opacity-50"
                     >
                       Cancel
                     </button>
@@ -402,20 +559,29 @@ export default function LeagueSelector({ onLeagueSelect }: LeagueSelectorProps) 
                 Delete League?
               </h3>
               <p className="text-gray-600 text-center mb-8 leading-relaxed">
-                This will permanently delete <strong>"{showDeleteConfirm}"</strong> and all its teams, matches, and history. This action cannot be undone.
+                This will permanently delete <strong>"{showDeleteConfirm.name}"</strong> and all its teams, matches, and history. This action cannot be undone.
               </p>
               <div className="flex space-x-4">
                 <button
                   onClick={() => setShowDeleteConfirm(null)}
-                  className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 px-6 py-4 rounded-xl font-bold transition-all duration-300 transform hover:scale-105"
+                  disabled={isLoading}
+                  className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 px-6 py-4 rounded-xl font-bold transition-all duration-300 transform hover:scale-105 disabled:opacity-50"
                 >
                   Keep League
                 </button>
                 <button
                   onClick={() => handleDeleteLeague(showDeleteConfirm)}
-                  className="flex-1 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white px-6 py-4 rounded-xl font-bold transition-all duration-300 transform hover:scale-105 shadow-lg"
+                  disabled={isLoading}
+                  className="flex-1 bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 text-white px-6 py-4 rounded-xl font-bold transition-all duration-300 transform hover:scale-105 shadow-lg disabled:opacity-50"
                 >
-                  Delete Forever
+                  {isLoading ? (
+                    <div className="flex items-center justify-center space-x-2">
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                      <span>Deleting...</span>
+                    </div>
+                  ) : (
+                    'Delete Forever'
+                  )}
                 </button>
               </div>
             </div>
