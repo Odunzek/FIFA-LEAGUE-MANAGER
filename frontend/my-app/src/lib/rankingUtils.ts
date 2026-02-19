@@ -15,6 +15,7 @@ import {
 } from "firebase/firestore";
 import { db } from "./firebase";
 import { getGroupMembers } from "./membershipUtils";
+import { getPlayers } from "./playerUtils";
 
 // TYPES
 export type RankingEntry = {
@@ -48,7 +49,7 @@ export function subscribeToRankings(
   });
 }
 
-// ENSURE RANKINGS FOR ALL MEMBERS
+// ENSURE RANKINGS FOR ALL MEMBERS (Legacy - uses group_members)
 export async function ensureRankingsForAllMembers(): Promise<RankingEntry[]> {
   const members = await getGroupMembers();
   const existing = await getAllRankings();
@@ -82,6 +83,90 @@ export async function ensureRankingsForAllMembers(): Promise<RankingEntry[]> {
   }
 
   return [...existing, ...newEntries].sort((a, b) => a.rank - b.rank);
+}
+
+// ENSURE RANKINGS FOR ALL PLAYERS (New - uses players collection)
+export async function ensureRankingsForAllPlayers(): Promise<RankingEntry[]> {
+  const players = await getPlayers();
+  const existing = await getAllRankings();
+
+  // Create a set of valid player IDs
+  const validPlayerIds = new Set(players.map((p) => p.id).filter(Boolean));
+  const existingIds = new Set(existing.map((r) => r.memberId));
+
+  const batch = writeBatch(db);
+  let cleanupCount = 0;
+  let addCount = 0;
+
+  // 1. CLEANUP: Remove rankings for players that no longer exist
+  for (const ranking of existing) {
+    if (!validPlayerIds.has(ranking.memberId)) {
+      batch.delete(doc(rankingsCol, ranking.memberId));
+      cleanupCount++;
+    }
+  }
+
+  // 2. ADD: Add missing players to rankings
+  const currentMaxRank = existing.length
+    ? Math.max(...existing.map((r) => r.rank))
+    : 0;
+  let nextRank = currentMaxRank + 1;
+
+  const newEntries: RankingEntry[] = [];
+
+  for (const player of players) {
+    if (player.id && !existingIds.has(player.id)) {
+      const entry: RankingEntry = {
+        memberId: player.id,
+        name: player.name,
+        rank: nextRank++,
+        coolOff: "",
+        wildCard: "",
+        updatedAt: serverTimestamp(),
+      };
+      batch.set(doc(rankingsCol, player.id), entry);
+      newEntries.push(entry);
+      addCount++;
+    }
+  }
+
+  // Commit all changes
+  if (cleanupCount > 0 || addCount > 0) {
+    await batch.commit();
+    if (cleanupCount > 0) {
+      console.log(`🧹 Removed ${cleanupCount} orphaned rankings`);
+    }
+    if (addCount > 0) {
+      console.log(`✅ Added ${addCount} players to P4P rankings`);
+    }
+  }
+
+  // Return cleaned up rankings
+  const validRankings = existing.filter((r) => validPlayerIds.has(r.memberId));
+  const allRankings = [...validRankings, ...newEntries].sort((a, b) => a.rank - b.rank);
+
+  // 3. RENUMBER: Fix gaps in ranking numbers (always check, not just after cleanup)
+  const renumberBatch = writeBatch(db);
+  let hasGaps = false;
+
+  allRankings.forEach((ranking, index) => {
+    const correctRank = index + 1;
+    if (ranking.rank !== correctRank) {
+      hasGaps = true;
+      renumberBatch.update(doc(rankingsCol, ranking.memberId), {
+        rank: correctRank,
+        updatedAt: serverTimestamp(),
+      });
+      ranking.rank = correctRank; // Update in-memory
+    }
+  });
+
+  if (hasGaps) {
+    await renumberBatch.commit();
+    console.log(`🔢 Renumbered rankings to fix gaps (fixed ${allRankings.length} ranks)`);
+  }
+
+  return allRankings;
 }
 
 // UPDATE SINGLE ENTRY FIELDS

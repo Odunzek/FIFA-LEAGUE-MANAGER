@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 80 80" width="80" height="80">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fde047"/>
+      <stop offset="100%" stop-color="#ca8a04"/>
+    </linearGradient>
+  </defs>
+  <!-- Star -->
+  <path d="M40 8l8 16.5 18.2 2.6-13.2 12.8 3.1 18.1L40 49.5 23.9 58l3.1-18.1L13.8 27.1l18.2-2.6z" fill="url(#g)"/>
+  <!-- Inner star highlight -->
+  <path d="M40 16l5 10.5 11.5 1.7-8.3 8.1 2 11.5L40 42.5l-10.2 5.3 2-11.5-8.3-8.1 11.5-1.7z" fill="#fff" opacity="0.2"/>
+  <!-- Laurel left -->
+  <path d="M16 52c4-2 8-1 10 2M12 58c4-2 9-1 11 2M10 64c4-2 9 0 11 3" fill="none" stroke="url(#g)" stroke-width="2.5" stroke-linecap="round"/>
+  <!-- Laurel right -->
+  <path d="M64 52c-4-2-8-1-10 2M68 58c-4-2-9-1-11 2M70 64c-4-2-9 0-11 3" fill="none" stroke="url(#g)" stroke-width="2.5" stroke-linecap="round"/>
+</svg>

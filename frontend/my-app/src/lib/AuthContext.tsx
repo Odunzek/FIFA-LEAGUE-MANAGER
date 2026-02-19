@@ -2,65 +2,111 @@
 "use client";
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import { User } from 'firebase/auth';
+import { auth, googleProvider, signInWithPopup, signOut, onAuthStateChanged } from './firebase';
+
+interface AdminUser {
+  email: string | null;
+  displayName: string | null;
+  photoURL: string | null;
+}
 
 interface AuthContextType {
   isAuthenticated: boolean;
-  login: (password: string) => boolean;
-  logout: () => void;
+  isLoading: boolean;
+  adminUser: AdminUser | null;
+  login: () => Promise<void>;
+  logout: () => Promise<void>;
   showAuthModal: boolean;
   setShowAuthModal: (show: boolean) => void;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
-// Default admin password - in production, this should be in environment variables
-const ADMIN_PASSWORD = process.env.NEXT_PUBLIC_ADMIN_PASSWORD;
+// Get authorized admin emails from environment variable
+const getAuthorizedEmails = (): string[] => {
+  const emails = process.env.NEXT_PUBLIC_ADMIN_EMAILS || '';
+  return emails.split(',').map(email => email.trim().toLowerCase()).filter(Boolean);
+};
+
+const isAuthorizedAdmin = (email: string | null): boolean => {
+  if (!email) return false;
+  const authorizedEmails = getAuthorizedEmails();
+  return authorizedEmails.includes(email.toLowerCase());
+};
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [adminUser, setAdminUser] = useState<AdminUser | null>(null);
   const [showAuthModal, setShowAuthModal] = useState(false);
 
-  // Check if user is already authenticated on mount
+  // Listen for Firebase auth state changes
   useEffect(() => {
-    const authStatus = localStorage.getItem('isAuthenticated');
-    const authTime = localStorage.getItem('authTime');
-    
-    if (authStatus === 'true' && authTime) {
-      const timeElapsed = Date.now() - parseInt(authTime);
-      // Authentication expires after 1 hour
-      if (timeElapsed < 60 * 60 * 1000) {
+    const unsubscribe = onAuthStateChanged(auth, (user: User | null) => {
+      if (user && !user.isAnonymous && isAuthorizedAdmin(user.email)) {
+        // User is signed in with Google and is an authorized admin
         setIsAuthenticated(true);
+        setAdminUser({
+          email: user.email,
+          displayName: user.displayName,
+          photoURL: user.photoURL,
+        });
       } else {
-        localStorage.removeItem('isAuthenticated');
-        localStorage.removeItem('authTime');
+        // User is not signed in or not authorized
+        setIsAuthenticated(false);
+        setAdminUser(null);
       }
-    }
+      setIsLoading(false);
+    });
+
+    return () => unsubscribe();
   }, []);
 
-  const login = (password: string): boolean => {
-    if (password === ADMIN_PASSWORD) {
-      setIsAuthenticated(true);
-      localStorage.setItem('isAuthenticated', 'true');
-      localStorage.setItem('authTime', Date.now().toString());
+  const login = async (): Promise<void> => {
+    try {
+      const result = await signInWithPopup(auth, googleProvider);
+      const user = result.user;
+
+      if (!isAuthorizedAdmin(user.email)) {
+        // User is not an authorized admin, sign them out
+        await signOut(auth);
+        throw new Error('ACCESS_DENIED');
+      }
+
+      // Trigger admin tutorial on first login
+      const wasFirstLogin = !localStorage.getItem('admin_logged_in_before');
+      if (wasFirstLogin) {
+        localStorage.setItem('admin_logged_in_before', 'true');
+        window.dispatchEvent(new CustomEvent('admin-logged-in'));
+      }
+
       setShowAuthModal(false);
-      return true;
+    } catch (error) {
+      // Re-throw the error so the modal can handle it
+      throw error;
     }
-    return false;
   };
 
-  const logout = () => {
-    setIsAuthenticated(false);
-    localStorage.removeItem('isAuthenticated');
-    localStorage.removeItem('authTime');
+  const logout = async (): Promise<void> => {
+    try {
+      await signOut(auth);
+      // After sign out, the onAuthStateChanged listener will update the state
+      // and trigger anonymous sign-in via firebase.ts
+    } catch (error) {
+      console.error('Logout failed:', error);
+    }
   };
 
   return (
     <AuthContext.Provider value={{
       isAuthenticated,
+      isLoading,
+      adminUser,
       login,
       logout,
       showAuthModal,
-      setShowAuthModal
+      setShowAuthModal,
     }}>
       {children}
     </AuthContext.Provider>
@@ -78,113 +124,114 @@ export function useAuth() {
 // Authentication Modal Component
 export function AuthModal() {
   const { login, showAuthModal, setShowAuthModal } = useAuth();
-  const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleGoogleSignIn = async () => {
     setIsLoading(true);
     setError('');
 
-    // Simulate brief loading for better UX
-    await new Promise(resolve => setTimeout(resolve, 500));
-
-    if (login(password)) {
-      setPassword('');
-    } else {
-      setError('Invalid password. Please try again.');
+    try {
+      await login();
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        if (err.message === 'ACCESS_DENIED') {
+          setError('Access denied. Your Google account is not authorized for admin access.');
+        } else if (err.message.includes('popup-closed-by-user')) {
+          // User closed the popup, don't show an error
+          setError('');
+        } else {
+          setError('Sign-in failed. Please try again.');
+        }
+      } else {
+        setError('An unexpected error occurred.');
+      }
     }
     setIsLoading(false);
   };
 
   const handleClose = () => {
     setShowAuthModal(false);
-    setPassword('');
     setError('');
   };
 
   if (!showAuthModal) return null;
 
   return (
-    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full mx-4 transform transition-all duration-300">
+    <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-50 p-4">
+      <div className="bg-gradient-to-br from-light-50 to-light-100 dark:from-dark-100 dark:to-dark-200 rounded-tech shadow-card-light dark:shadow-glow border border-cyber-500/20 dark:border-cyber-500/30 max-w-md w-full mx-4 transform transition-all duration-300">
         <div className="p-8">
-          <div className="flex items-center justify-center w-16 h-16 mx-auto mb-6 bg-blue-100 rounded-full">
+          <div className="flex items-center justify-center w-16 h-16 mx-auto mb-6 bg-gradient-cyber rounded-tech shadow-glow">
             <span className="text-3xl">🔐</span>
           </div>
-          <h3 className="text-2xl font-bold text-gray-900 text-center mb-3">
-            Authentication Required
+          <h3 className="text-2xl font-bold text-light-900 dark:text-white text-center mb-3">
+            Admin Authentication
           </h3>
-          <p className="text-gray-600 text-center mb-8">
-            Enter the admin password to record match results
+          <p className="text-light-600 dark:text-gray-400 text-center mb-8">
+            Sign in with your authorized Google account to access admin features
           </p>
 
-          <form onSubmit={handleSubmit} className="space-y-6">
-            <div>
-              <label className="block text-sm font-bold text-gray-700 mb-3">
-                Admin Password
-              </label>
-              <input
-                type="password"
-                value={password}
-                onChange={(e) => {
-                  setPassword(e.target.value);
-                  setError('');
-                }}
-                className={`w-full px-4 py-4 border-2 rounded-xl text-gray-900 focus:outline-none transition-all duration-300 ${
-                  error 
-                    ? 'border-red-300 focus:border-red-500 focus:ring-4 focus:ring-red-100' 
-                    : 'border-gray-200 focus:border-blue-500 focus:ring-4 focus:ring-blue-100'
-                }`}
-                placeholder="Enter admin password"
-                autoFocus
-                disabled={isLoading}
-              />
-              {error && (
-                <div className="mt-2 flex items-center space-x-2 text-red-600">
-                  <span className="text-sm">❌</span>
-                  <span className="text-sm font-medium">{error}</span>
+          <div className="space-y-6">
+            {error && (
+              <div className="flex items-center gap-2 text-red-400 bg-red-500/10 border border-red-500/30 rounded-tech px-4 py-3">
+                <span className="text-sm">⚠️</span>
+                <span className="text-sm font-medium">{error}</span>
+              </div>
+            )}
+
+            <button
+              onClick={handleGoogleSignIn}
+              disabled={isLoading}
+              className="w-full flex items-center justify-center gap-3 bg-white hover:bg-gray-100 text-gray-800 px-6 py-4 rounded-tech font-bold transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isLoading ? (
+                <div className="flex items-center gap-2">
+                  <div className="w-5 h-5 border-2 border-gray-800 border-t-transparent rounded-full animate-spin"></div>
+                  <span>Signing in...</span>
                 </div>
+              ) : (
+                <>
+                  <svg className="w-5 h-5" viewBox="0 0 24 24">
+                    <path
+                      fill="#4285F4"
+                      d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"
+                    />
+                    <path
+                      fill="#34A853"
+                      d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"
+                    />
+                    <path
+                      fill="#FBBC05"
+                      d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"
+                    />
+                    <path
+                      fill="#EA4335"
+                      d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"
+                    />
+                  </svg>
+                  <span>Sign in with Google</span>
+                </>
               )}
-            </div>
+            </button>
 
-            <div className="flex space-x-4">
-              <button
-                type="button"
-                onClick={handleClose}
-                disabled={isLoading}
-                className="flex-1 bg-gray-200 hover:bg-gray-300 text-gray-800 px-6 py-4 rounded-xl font-bold transition-all duration-300 transform hover:scale-105 disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={!password.trim() || isLoading}
-                className="flex-1 bg-gradient-to-r from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700 disabled:from-gray-400 disabled:to-gray-500 text-white px-6 py-4 rounded-xl font-bold transition-all duration-300 transform hover:scale-105 shadow-lg disabled:cursor-not-allowed disabled:transform-none"
-              >
-                {isLoading ? (
-                  <div className="flex items-center justify-center space-x-2">
-                    <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                    <span>Authenticating...</span>
-                  </div>
-                ) : (
-                  'Authenticate'
-                )}
-              </button>
-            </div>
-          </form>
+            <button
+              type="button"
+              onClick={handleClose}
+              disabled={isLoading}
+              className="w-full bg-light-200 hover:bg-light-300 dark:bg-dark-50 dark:hover:bg-dark-100 text-light-700 dark:text-gray-300 px-6 py-4 rounded-tech font-bold transition-all duration-300 border border-black/10 dark:border-white/10 hover:border-black/20 dark:hover:border-white/20 disabled:opacity-50"
+            >
+              Cancel
+            </button>
+          </div>
 
-          {/* <div className="mt-6 p-4 bg-yellow-50 rounded-xl border border-yellow-200">
+          <div className="mt-6 p-4 bg-cyber-500/10 rounded-tech border border-cyber-500/20">
             <div className="flex items-start space-x-3">
-              <span className="text-yellow-600 text-lg mt-0.5">💡</span>
-              <div className="text-sm text-yellow-800">
-                <p className="font-medium mb-1">Default Password:</p>
-                <p className="font-mono bg-yellow-100 px-2 py-1 rounded">admin123</p>
-                <p className="text-xs mt-1 text-yellow-700">Change this in production by setting NEXT_PUBLIC_ADMIN_PASSWORD environment variable</p>
+              <span className="text-cyber-400 text-lg mt-0.5">ℹ️</span>
+              <div className="text-sm text-light-600 dark:text-gray-400">
+                <p>Only authorized Google accounts can access admin features. Contact the administrator if you need access.</p>
               </div>
             </div>
-          </div> */}
+          </div>
         </div>
       </div>
     </div>

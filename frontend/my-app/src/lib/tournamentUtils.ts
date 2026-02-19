@@ -1,29 +1,58 @@
 // lib/tournamentUtils.ts
-import { 
-  collection, 
-  addDoc, 
-  getDocs, 
-  doc, 
-  updateDoc, 
-  deleteDoc, 
-  query, 
-  where, 
+import {
+  collection,
+  addDoc,
+  getDocs,
+  doc,
+  updateDoc,
+  deleteDoc,
+  query,
+  where,
   onSnapshot,
-  orderBy 
+  orderBy,
+  Timestamp,
+  serverTimestamp
 } from 'firebase/firestore';
 import { db } from './firebase';
 import { v4 as uuidv4 } from "uuid";
+
+// Convert Firestore Timestamp to JavaScript Date
+export const convertTimestamp = (timestamp: any): Date => {
+  if (!timestamp) return new Date();
+
+  // If it's already a Date object
+  if (timestamp instanceof Date) {
+    return timestamp;
+  }
+
+  // If it's a Firestore Timestamp with toDate method
+  if (timestamp.toDate && typeof timestamp.toDate === 'function') {
+    return timestamp.toDate();
+  }
+
+  // If it's a Firestore Timestamp with seconds and nanoseconds
+  if (timestamp.seconds !== undefined) {
+    return new Date(timestamp.seconds * 1000);
+  }
+
+  // If it's a string or number, try to parse it
+  try {
+    return new Date(timestamp);
+  } catch {
+    return new Date();
+  }
+};
 
 // Remove ALL undefined values
 const removeUndefinedValues = (obj: any): any => {
   if (obj === null || obj === undefined) {
     return null;
   }
-  
+
   if (Array.isArray(obj)) {
     return obj.map(item => removeUndefinedValues(item)).filter(item => item !== null && item !== undefined);
   }
-  
+
   if (typeof obj === 'object') {
     const cleaned: any = {};
     Object.keys(obj).forEach(key => {
@@ -34,7 +63,7 @@ const removeUndefinedValues = (obj: any): any => {
     });
     return cleaned;
   }
-  
+
   return obj;
 };
 
@@ -148,6 +177,7 @@ export interface Tournament {
   name: string;
   type: 'league' | 'champions_league' | 'knockout' | 'custom';
   status: 'setup' | 'group_stage' | 'knockout' | 'completed';
+  seasonId?: string; // references seasons collection doc ID
   createdAt: Date;
   startDate?: Date;
   endDate?: Date;
@@ -156,7 +186,7 @@ export interface Tournament {
   groups?: TournamentGroup[];
   knockoutBracket?: KnockoutTie[];
   settings: TournamentSettings;
-  qualifiedTeams?: TournamentParticipant[];  
+  qualifiedTeams?: TournamentParticipant[];
 }
 
 export interface TournamentGroup {
@@ -198,6 +228,14 @@ export interface GroupMatch {
   matchday: number; // 1-6 for group stage
 }
 
+export interface PointAdjustment {
+  id: string;
+  amount: number;
+  reason: string;
+  timestamp: any; // Firestore Timestamp or Date
+  adjustedBy: string; // Admin identifier
+}
+
 export interface GroupStanding {
   memberId?: string;
   teamName: string;
@@ -210,6 +248,7 @@ export interface GroupStanding {
   goalDifference: number;
   points: number;
   position: number;
+  pointAdjustments?: PointAdjustment[]; // Track manual adjustments
 }
 
 export interface KnockoutMatch {
@@ -296,12 +335,15 @@ export const DEFAULT_KNOCKOUT_SETTINGS: TournamentSettings = {
 // Tournament Functions
 export const createTournament = async (tournamentData: Omit<Tournament, 'id' | 'createdAt' | 'currentTeams'>): Promise<string> => {
   try {
-    const docRef = await addDoc(collection(db, 'tournaments'), {
+    // Remove undefined values before saving to Firestore
+    const cleanData = removeUndefinedValues({
       ...tournamentData,
       createdAt: new Date(),
       currentTeams: 0,
       status: 'setup'
     });
+
+    const docRef = await addDoc(collection(db, 'tournaments'), cleanData);
     return docRef.id;
   } catch (error) {
     console.error('Error creating tournament:', error);
@@ -441,19 +483,33 @@ export const addMemberToTournament = async (
   tournamentId: string,
   member: {
     name: string;
-    psnId: string;
+    psnId?: string;
     groupId?: string | null;
     tournamentId?: string;
     createdAt?: Date;
   }
 ): Promise<string> => {
   try {
-    // ✅ Add to Firestore with all fields dynamically spread
-    const docRef = await addDoc(collection(db, "tournament_members"), {
+    // Build member data without undefined values
+    const memberData: any = {
       tournamentId,
       eliminated: false,
-      ...member,
-    });
+      name: member.name,
+    };
+
+    // Only add optional fields if they have values
+    if (member.psnId) {
+      memberData.psnId = member.psnId;
+    }
+    if (member.groupId !== undefined && member.groupId !== null) {
+      memberData.groupId = member.groupId;
+    }
+    if (member.createdAt) {
+      memberData.createdAt = member.createdAt;
+    }
+
+    // ✅ Add to Firestore without undefined values
+    const docRef = await addDoc(collection(db, "tournament_members"), memberData);
 
     // ✅ Update tournament currentTeams count
     const tournament = await getTournamentById(tournamentId);
@@ -482,6 +538,22 @@ export const getTournamentMembers = async (tournamentId: string): Promise<Tourna
   } catch (error) {
     console.error('Error getting tournament teams:', error);
     return [];
+  }
+};
+
+/**
+ * Reassign a tournament member to a different group
+ */
+export const reassignMemberToGroup = async (memberId: string, newGroupId: string): Promise<void> => {
+  try {
+    const memberRef = doc(db, 'tournament_members', memberId);
+    await updateDoc(memberRef, {
+      groupId: newGroupId
+    });
+    console.log(`✅ Member ${memberId} reassigned to group ${newGroupId}`);
+  } catch (error) {
+    console.error('❌ Error reassigning member to group:', error);
+    throw error;
   }
 };
 
@@ -942,7 +1014,118 @@ export const recordKnockoutMatch = async (
   }
 };
 
+/**
+ * Edit a knockout tie's matchup (change teams)
+ * Resets legs and results when teams change
+ */
+export const editKnockoutTie = async (
+  tournamentId: string,
+  tieId: string,
+  updates: { team1?: string; team2?: string }
+): Promise<void> => {
+  try {
+    const tournament = await getTournamentById(tournamentId);
+    if (!tournament || !tournament.knockoutBracket) {
+      throw new Error('Tournament or knockout bracket not found');
+    }
 
+    const knockoutBracket = [...tournament.knockoutBracket];
+    const tieIndex = knockoutBracket.findIndex(tie => tie.id === tieId);
+
+    if (tieIndex === -1) {
+      throw new Error('Tie not found in knockout bracket');
+    }
+
+    const tie = { ...knockoutBracket[tieIndex] };
+    const newTeam1 = updates.team1 || tie.team1;
+    const newTeam2 = updates.team2 || tie.team2;
+    const teamsChanged = newTeam1 !== tie.team1 || newTeam2 !== tie.team2;
+
+    tie.team1 = newTeam1;
+    tie.team2 = newTeam2;
+
+    if (teamsChanged) {
+      // Reset both legs
+      tie.firstLeg = {
+        id: tie.firstLeg?.id || `${tieId}_leg1`,
+        leg: 'first',
+        homeTeam: newTeam1,
+        awayTeam: newTeam2,
+        played: false,
+      };
+      tie.secondLeg = {
+        id: tie.secondLeg?.id || `${tieId}_leg2`,
+        leg: 'second',
+        homeTeam: newTeam2,
+        awayTeam: newTeam1,
+        played: false,
+      };
+      // Reset tie result
+      tie.winner = undefined as any;
+      tie.completed = false;
+      tie.aggregateScore = undefined as any;
+    } else {
+      // Just update home/away team names on legs
+      tie.firstLeg = { ...tie.firstLeg, homeTeam: newTeam1, awayTeam: newTeam2 };
+      tie.secondLeg = { ...tie.secondLeg, homeTeam: newTeam2, awayTeam: newTeam1 };
+    }
+
+    knockoutBracket[tieIndex] = tie;
+    await updateTournament(tournamentId, { knockoutBracket });
+  } catch (error) {
+    console.error('Error editing knockout tie:', error);
+    throw error;
+  }
+};
+
+/**
+ * Repair knockout progression — generate missing next rounds
+ * Idempotent: skips if next round already exists
+ */
+export const repairKnockoutProgression = async (
+  tournamentId: string
+): Promise<{ repaired: boolean; roundsGenerated: string[] }> => {
+  try {
+    const tournament = await getTournamentById(tournamentId);
+    if (!tournament || !tournament.knockoutBracket) {
+      throw new Error('Tournament or knockout bracket not found');
+    }
+
+    const knockoutBracket = [...tournament.knockoutBracket];
+    const roundsGenerated: string[] = [];
+    const roundOrder = ['round_16', 'quarter_final', 'semi_final'];
+
+    for (const round of roundOrder) {
+      const roundTies = knockoutBracket.filter(t => t.round === round && !t.originalTieId);
+      if (roundTies.length === 0) continue;
+
+      if (!isRoundComplete(knockoutBracket, round)) continue;
+
+      const nextRound = getNextRound(round);
+      if (!nextRound) continue;
+
+      // Check if next round already exists
+      const nextRoundTies = knockoutBracket.filter(t => t.round === nextRound && !t.originalTieId);
+      if (nextRoundTies.length > 0) continue;
+
+      const winners = getRoundWinners(knockoutBracket, round);
+      if (winners.length < 2) continue;
+
+      const newTies = generateNextRound(winners, nextRound);
+      knockoutBracket.push(...newTies);
+      roundsGenerated.push(nextRound);
+    }
+
+    if (roundsGenerated.length > 0) {
+      await updateTournament(tournamentId, { knockoutBracket });
+    }
+
+    return { repaired: roundsGenerated.length > 0, roundsGenerated };
+  } catch (error) {
+    console.error('Error repairing knockout progression:', error);
+    throw error;
+  }
+};
 
 // Replace your existing qualification logic with this:
 
@@ -1348,6 +1531,65 @@ const calculateKnockoutSize = (totalGroups: number): number => {
   return sortedStandings;
 };
 
+/**
+ * Adjust team points manually (for rule violations, fair play bonuses, etc.)
+ */
+export const adjustTeamPoints = async (
+  tournamentId: string,
+  groupId: string,
+  teamName: string,
+  adjustment: number,
+  reason: string
+): Promise<void> => {
+  try {
+    const tournament = await getTournamentById(tournamentId);
+    if (!tournament || !tournament.groups) {
+      throw new Error('Tournament or groups not found');
+    }
+
+    const updatedGroups = tournament.groups.map(group => {
+      if (group.id === groupId) {
+        const updatedStandings = group.standings.map(standing => {
+          if (standing.teamName === teamName) {
+            // Create adjustment record
+            const pointAdjustment: PointAdjustment = {
+              id: uuidv4(),
+              amount: adjustment,
+              reason: reason,
+              timestamp: Timestamp.now(),
+              adjustedBy: 'admin' // Can be enhanced to track specific admin
+            };
+
+            // Add adjustment to history
+            const existingAdjustments = standing.pointAdjustments || [];
+            const updatedAdjustments = [...existingAdjustments, pointAdjustment];
+
+            // Update points
+            return {
+              ...standing,
+              points: standing.points + adjustment,
+              pointAdjustments: updatedAdjustments
+            };
+          }
+          return standing;
+        });
+
+        return {
+          ...group,
+          standings: updatedStandings
+        };
+      }
+      return group;
+    });
+
+    await updateTournament(tournamentId, { groups: updatedGroups });
+    console.log(`✅ Adjusted points for ${teamName} by ${adjustment > 0 ? '+' : ''}${adjustment}: ${reason}`);
+  } catch (error) {
+    console.error('❌ Error adjusting team points:', error);
+    throw error;
+  }
+};
+
 // Real-time listeners
 export const subscribeToTournaments = (callback: (tournaments: Tournament[]) => void) => {
   const q = query(collection(db, 'tournaments'), orderBy('createdAt', 'desc'));
@@ -1368,6 +1610,21 @@ export const subscribeToTournamentMembers = (tournamentId: string, callback: (me
       ...doc.data()
     } as TournamentParticipant));
     callback(members);
+  });
+};
+
+export const subscribeToTournamentById = (tournamentId: string, callback: (tournament: Tournament | null) => void) => {
+  const tournamentRef = doc(db, 'tournaments', tournamentId);
+  return onSnapshot(tournamentRef, (snapshot) => {
+    if (snapshot.exists()) {
+      const tournament = {
+        id: snapshot.id,
+        ...snapshot.data()
+      } as Tournament;
+      callback(tournament);
+    } else {
+      callback(null);
+    }
   });
 };
 
